@@ -1,0 +1,14 @@
+pandas
+numpy
+networkx
+matplotlib
+seaborn
+scikit-learn
+neo4j
+langchain
+langchain-community
+chromadb
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv

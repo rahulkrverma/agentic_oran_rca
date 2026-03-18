@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+
+# Documentation / diagrams (not needed in runtime image)
+docs/
+
+# Tests (optional: remove if tests run in image)
+tests/
+*_test.py
+test_*.py
+
+# Local data (mounted at runtime, not baked in)
+data/
+results/
+
+# Environment and secrets
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# README and non-runtime files
+README.md
+*.md
