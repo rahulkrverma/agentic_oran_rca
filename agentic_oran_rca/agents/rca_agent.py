@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +12,34 @@ from pydantic import BaseModel, Field
 from agentic_oran_rca.agents.context_agent import RetrievedContext
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_json(raw: str) -> dict[str, Any]:
+    raw = raw.strip()
+    code_block = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
+    if code_block:
+        block = code_block.group(1).strip()
+        start = block.find("{")
+        if start >= 0:
+            depth = 0
+            for i, c in enumerate(block[start:], start):
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return json.loads(block[start : i + 1])
+    start = raw.find("{")
+    if start >= 0:
+        depth = 0
+        for i, c in enumerate(raw[start:], start):
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return json.loads(raw[start : i + 1])
+    return json.loads(raw)
 
 
 class RCAOutput(BaseModel):
@@ -67,7 +96,7 @@ class RCAAnalysisAgent:
         msg = self._llm.invoke(prompt)
         raw = str(getattr(msg, "content", msg))
         try:
-            obj = json.loads(raw)
+            obj = _extract_json(raw)
         except json.JSONDecodeError as e:
             raise RuntimeError(f"LLM returned non-JSON output: {raw}") from e
 

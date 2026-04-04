@@ -16,6 +16,8 @@ from sklearn.pipeline import Pipeline as SkPipeline
 
 from agentic_oran_rca.agents.context_agent import ContextRetrievalAgent
 from agentic_oran_rca.agents.explanation_agent import ExplanationAgent, ExplanationAgentConfig
+from agentic_oran_rca.agents.notification_service import HealingReport, NotificationService
+from agentic_oran_rca.agents.remediation_agent import RemediationAgent
 from agentic_oran_rca.agents.rca_agent import RCAAnalysisAgent, RCAAgentConfig
 from agentic_oran_rca.config import Settings, load_settings
 from agentic_oran_rca.evaluation.graph_generator import (
@@ -100,6 +102,102 @@ def build_pipeline(settings: Settings) -> RCAPipeline:
         ExplanationAgentConfig(ollama_base_url=settings.ollama_base_url, ollama_model=settings.ollama_model)
     )
     return RCAPipeline(ctx_agent=ctx_agent, rca_agent=rca_agent, expl_agent=expl_agent)
+
+
+class HealingPipeline:
+    """
+    Self-healing extension: runs RCA (unchanged), then remediation + report + notification.
+    Does not modify the core RCA flow.
+    """
+
+    def __init__(
+        self,
+        rca_pipeline: RCAPipeline,
+        ctx_agent: ContextRetrievalAgent,
+        remediation_agent: RemediationAgent,
+        notification_service: NotificationService,
+    ) -> None:
+        self._rca = rca_pipeline
+        self._ctx_agent = ctx_agent
+        self._remediation = remediation_agent
+        self._notifier = notification_service
+
+    def run_with_healing(self, cell: str, alarm: str, kpi: str) -> dict[str, Any]:
+        rca_out = self._rca.run(cell=cell, alarm=alarm, kpi=kpi)
+        ctx = self._ctx_agent.run(cell_id=cell, alarm=alarm, k=7)
+        rem = self._remediation.run(
+            cell=cell,
+            du=ctx.du,
+            cu=ctx.cu,
+            alarm=alarm,
+            predicted_root_cause=rca_out["predicted_root_cause"],
+            confidence=rca_out["confidence"],
+        )
+        report = HealingReport(
+            timestamp_utc=rem.timestamp_utc,
+            cell=cell,
+            du=ctx.du,
+            cu=ctx.cu,
+            alarm=alarm,
+            kpi=kpi,
+            predicted_root_cause=rca_out["predicted_root_cause"],
+            confidence=rca_out["confidence"],
+            remediation_action=rem.action,
+            remediation_success=rem.success,
+            notification_type="auto_correction_success" if rem.success else "auto_correction_failure",
+            message=rem.message,
+        )
+        report_path = self._notifier.write_healing_report(report)
+        self._notifier.send_notification(
+            notification_type=report.notification_type,
+            cell=cell,
+            alarm=alarm,
+            root_cause=rca_out["predicted_root_cause"],
+            remediation_success=rem.success,
+            message=rem.message,
+            report_path=report_path,
+        )
+        return {
+            "predicted_root_cause": rca_out["predicted_root_cause"],
+            "confidence": rca_out["confidence"],
+            "explanation": rca_out["explanation"],
+            "healing": {
+                "remediation_action": rem.action,
+                "remediation_description": rem.action_description,
+                "success": rem.success,
+                "message": rem.message,
+                "report_path": str(report_path),
+                "notification_sent": True,
+            },
+        }
+
+
+def build_healing_pipeline(settings: Settings) -> HealingPipeline:
+    pipeline = build_pipeline(settings)
+    neo4j = Neo4jClient(
+        Neo4jConfig(uri=settings.neo4j_uri, user=settings.neo4j_user, password=settings.neo4j_password)
+    )
+    vs = build_vector_store(
+        VectorStoreConfig(
+            chroma_host=settings.chroma_host,
+            chroma_port=settings.chroma_port,
+            collection_name="oran_rca_incidents",
+            ollama_base_url=settings.ollama_base_url,
+            ollama_embed_model=settings.ollama_embed_model,
+        )
+    )
+    ctx_agent = ContextRetrievalAgent(neo4j=neo4j, retriever=IncidentRetriever(vs))
+    remediation = RemediationAgent(success_rate=0.85)
+    notifier = NotificationService(
+        reports_dir=RESULTS_DIR / "healing_reports",
+        notifications_path=RESULTS_DIR / "notifications.jsonl",
+    )
+    return HealingPipeline(
+        rca_pipeline=pipeline,
+        ctx_agent=ctx_agent,
+        remediation_agent=remediation,
+        notification_service=notifier,
+    )
 
 
 def _require_file(path: Path) -> None:

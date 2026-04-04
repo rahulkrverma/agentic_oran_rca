@@ -48,6 +48,19 @@ curl -X POST http://localhost:8000/run_rca ^
   -d "{\"cell\":\"Cell15\",\"alarm\":\"Cell Down\",\"kpi\":\"RSRP Drop\"}"
 ```
 
+#### Run RCA with self-healing (optional)
+
+Runs RCA, then simulates remediation, writes an auto-correction report, and records a notification:
+
+```powershell
+$body = @{ cell = "Cell15"; alarm = "Cell Down"; kpi = "RSRP Drop" } | ConvertTo-Json
+Invoke-WebRequest -Uri "http://localhost:8000/run_rca_with_healing" -Method POST -ContentType "application/json" -Body $body
+```
+
+Outputs:
+- `results/healing_reports/healing_<cell>_<timestamp>.json` – auto-correction report
+- `results/notifications.jsonl` – notification log (success or failure)
+
 #### Start application (Local, without Docker)
 
 1. Start Neo4j, Chroma, and Ollama yourself (or use Docker for those services only).
@@ -129,6 +142,7 @@ curl -X POST http://localhost:8000/run_rca ^
 
 - **Dataset**: `data/telecom_dataset.csv`
 - **Graphs**: `results/graphs/*.png` and `results/graphs/*.pdf`
+- **Postman testing**: `docs/POSTMAN_TESTING.md`
 - **Neo4j UI**: `http://localhost:7474` (user: `neo4j`, password: `admin1234`)
 - **Chroma**: `http://localhost:8001`
 
