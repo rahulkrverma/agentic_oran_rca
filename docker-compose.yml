@@ -11,6 +11,12 @@ services:
       - NEO4J_server_memory_heap_max__size=1G
     volumes:
       - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p admin1234 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 50s
 
   chroma:
     image: chromadb/chroma:latest
@@ -21,6 +27,13 @@ services:
       - ANONYMIZED_TELEMETRY=FALSE
     volumes:
       - chroma_data:/chroma/chroma
+    healthcheck:
+      # chromadb/chroma image has no python/curl/wget in PATH; bash /dev/tcp checks the listener.
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8000'"]
+      interval: 5s
+      timeout: 10s
+      retries: 24
+      start_period: 20s
 
   ollama:
     image: ollama/ollama:latest
@@ -34,9 +47,13 @@ services:
       context: .
       dockerfile: Dockerfile
     depends_on:
-      - neo4j
-      - chroma
-      - ollama
+      neo4j:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:

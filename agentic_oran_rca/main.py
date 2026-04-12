@@ -14,6 +14,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline as SkPipeline
 
+from agentic_oran_rca.agents.auto_correction_agent import AutoCorrectionAgent, AutoCorrectionAgentConfig
 from agentic_oran_rca.agents.context_agent import ContextRetrievalAgent
 from agentic_oran_rca.agents.explanation_agent import ExplanationAgent, ExplanationAgentConfig
 from agentic_oran_rca.agents.notification_service import HealingReport, NotificationService
@@ -28,6 +29,7 @@ from agentic_oran_rca.evaluation.graph_generator import (
     plot_network_topology_graph,
 )
 from agentic_oran_rca.evaluation.metrics import compute_metrics
+from agentic_oran_rca.evaluation.ranking_metrics import run_ranking_evaluation
 from agentic_oran_rca.graph.graph_builder import (
     TopologySpec,
     generate_oran_topology,
@@ -51,6 +53,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 RESULTS_DIR = PROJECT_ROOT / "results"
 GRAPHS_DIR = RESULTS_DIR / "graphs"
+RANKING_EVALUATION_DIR = RESULTS_DIR / "ranking_evaluation"
 
 
 class RCAPipeline:
@@ -197,6 +200,33 @@ def build_healing_pipeline(settings: Settings) -> HealingPipeline:
         ctx_agent=ctx_agent,
         remediation_agent=remediation,
         notification_service=notifier,
+    )
+
+
+def build_auto_correction_agent(settings: Settings) -> AutoCorrectionAgent:
+    neo4j = Neo4jClient(
+        Neo4jConfig(uri=settings.neo4j_uri, user=settings.neo4j_user, password=settings.neo4j_password)
+    )
+    vs = build_vector_store(
+        VectorStoreConfig(
+            chroma_host=settings.chroma_host,
+            chroma_port=settings.chroma_port,
+            collection_name="oran_rca_incidents",
+            ollama_base_url=settings.ollama_base_url,
+            ollama_embed_model=settings.ollama_embed_model,
+        )
+    )
+    retriever = IncidentRetriever(vs)
+    ctx_agent = ContextRetrievalAgent(neo4j=neo4j, retriever=retriever)
+    rca_agent = RCAAnalysisAgent(RCAAgentConfig(ollama_base_url=settings.ollama_base_url, ollama_model=settings.ollama_model))
+    expl_agent = ExplanationAgent(
+        ExplanationAgentConfig(ollama_base_url=settings.ollama_base_url, ollama_model=settings.ollama_model)
+    )
+    return AutoCorrectionAgent(
+        ctx_agent=ctx_agent,
+        rca_agent=rca_agent,
+        expl_agent=expl_agent,
+        cfg=AutoCorrectionAgentConfig(ollama_base_url=settings.ollama_base_url, ollama_model=settings.ollama_model),
     )
 
 
@@ -364,6 +394,44 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
     logger.info("Saved evaluation results to %s", RESULTS_DIR)
 
 
+def cmd_evaluate_ranking(args: argparse.Namespace) -> None:
+    settings = load_settings()
+    setup_logging(settings.log_level)
+
+    _require_file(DATA_DIR / "telecom_dataset.csv")
+    df = pd.read_csv(DATA_DIR / "telecom_dataset.csv")
+
+    k_values = [int(x.strip()) for x in str(args.k_values).split(",") if x.strip()]
+    if not k_values:
+        raise RuntimeError("k_values must list at least one integer K")
+
+    vs = build_vector_store(
+        VectorStoreConfig(
+            chroma_host=settings.chroma_host,
+            chroma_port=settings.chroma_port,
+            collection_name="oran_rca_incidents",
+            ollama_base_url=settings.ollama_base_url,
+            ollama_embed_model=settings.ollama_embed_model,
+        )
+    )
+    retriever = IncidentRetriever(vs)
+
+    report_name = str(getattr(args, "report_name", "")).strip()
+    if not report_name:
+        report_name = f"Chroma+{settings.ollama_embed_model}"
+
+    run_ranking_evaluation(
+        df,
+        retriever,
+        test_size=float(args.test_size),
+        seed=int(args.seed),
+        k_values=k_values,
+        retrieve_pool=int(args.retrieve_pool),
+        output_dir=RANKING_EVALUATION_DIR,
+        report_model_name=report_name,
+    )
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     settings = load_settings()
     setup_logging(settings.log_level)
@@ -395,6 +463,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     e.add_argument("--test-size", type=float, required=True)
     e.add_argument("--seed", type=int, required=True)
     e.set_defaults(func=cmd_evaluate)
+
+    rk = sub.add_parser("evaluate-ranking")
+    rk.add_argument("--test-size", type=float, required=True)
+    rk.add_argument("--seed", type=int, required=True)
+    rk.add_argument("--k-values", type=str, required=True, help="Comma-separated K values, e.g. 1,3,5,7,10")
+    rk.add_argument("--retrieve-pool", type=int, required=True, help="Chroma hits per query before dedupe (>= max K)")
+    rk.add_argument(
+        "--report-name",
+        type=str,
+        default="",
+        help="Label for the model/system row in difficulty tables (default: Chroma+<OLLAMA_EMBED_MODEL>)",
+    )
+    rk.set_defaults(func=cmd_evaluate_ranking)
 
     s = sub.add_parser("serve")
     s.add_argument("--host", type=str, required=True)
