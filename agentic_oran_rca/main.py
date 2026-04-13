@@ -15,6 +15,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline as SkPipeline
 
 from agentic_oran_rca.agents.auto_correction_agent import AutoCorrectionAgent, AutoCorrectionAgentConfig
+from agentic_oran_rca.agents.master_orchestrator_agent import MasterOrchestratorAgent
 from agentic_oran_rca.agents.context_agent import ContextRetrievalAgent
 from agentic_oran_rca.agents.explanation_agent import ExplanationAgent, ExplanationAgentConfig
 from agentic_oran_rca.agents.notification_service import HealingReport, NotificationService
@@ -227,6 +228,21 @@ def build_auto_correction_agent(settings: Settings) -> AutoCorrectionAgent:
         rca_agent=rca_agent,
         expl_agent=expl_agent,
         cfg=AutoCorrectionAgentConfig(ollama_base_url=settings.ollama_base_url, ollama_model=settings.ollama_model),
+    )
+
+
+def build_master_orchestrator(settings: Settings) -> MasterOrchestratorAgent:
+    """
+    Constructs a master orchestrator that wraps existing pipelines and agents.
+    Does not replace or alter RCAPipeline, HealingPipeline, or AutoCorrectionAgent behavior.
+    """
+    rca_pipeline = build_pipeline(settings)
+    healing_pipeline = build_healing_pipeline(settings)
+    auto_correction_agent = build_auto_correction_agent(settings)
+    return MasterOrchestratorAgent(
+        rca_pipeline=rca_pipeline,
+        healing_pipeline=healing_pipeline,
+        auto_correction_agent=auto_correction_agent,
     )
 
 

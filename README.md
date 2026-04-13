@@ -1,5 +1,15 @@
 ## Agentic Retrieval-Augmented Root Cause Analysis System for Cell Outage Recovery in O-RAN Networks
 
+**Architecture (diagrams):** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — layered stack, sequences, agent flows, offline evaluation.
+
+**Project report (college submission):** [`docs/PROJECT_REPORT.md`](docs/PROJECT_REPORT.md) — formal write-up, figure placeholders, validation, test results. To build **Word** (`.docx`), install [Pandoc](https://pandoc.org/installing.html), then from the repo root:
+
+```powershell
+& "$env:LOCALAPPDATA\Pandoc\pandoc.exe" -f markdown -t docx -o docs/PROJECT_REPORT.docx docs/PROJECT_REPORT.md
+```
+
+`docs/PROJECT_REPORT.md`, `docs/ARCHITECTURE.md`, and `docs/PROJECT_REPORT.docx` are listed in `.gitignore` (omit from version control if you prefer).
+
 ### Runbook (complete instructions)
 
 #### Prerequisites

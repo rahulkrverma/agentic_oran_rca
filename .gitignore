@@ -35,6 +35,9 @@ htmlcov/
 *.pem
 
 # Project-specific
+docs/PROJECT_REPORT.md
+docs/ARCHITECTURE.md
+docs/PROJECT_REPORT.docx
 data/*.csv
 data/topology.json
 results/
