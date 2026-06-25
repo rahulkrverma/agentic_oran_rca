@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 
 from agentic_oran_rca.agents.context_agent import RetrievedContext
 

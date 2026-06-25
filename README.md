@@ -12,6 +12,10 @@
 
 ### Runbook (complete instructions)
 
+**Dual-dataset guide (O-RAN + TelcoLLM):** [`MTP1/docs/DUAL_DATASET_RUNBOOK.md`](MTP1/docs/DUAL_DATASET_RUNBOOK.md) — step-by-step commands for both tracks, API endpoints, evaluation, and troubleshooting.
+
+**Complete application guide (for viva / professor):** [`docs/APPLICATION_COMPLETE_GUIDE.md`](docs/APPLICATION_COMPLETE_GUIDE.md) — before/after dual-dataset, architecture, advantages/disadvantages, and demonstration script. *(Local only; `docs/` is in `.gitignore`.)*
+
 #### Prerequisites
 
 - Docker Desktop (recommended), or Python 3.10+ for local run
@@ -45,8 +49,10 @@ docker exec -it agentic_oran_rca-ollama-1 ollama pull nomic-embed-text
 
 ```bash
 docker compose exec api python -m agentic_oran_rca.main generate-data --rows 800 --seed 42 --start-time-utc 2026-01-01T00:00:00 --span-days 60 --log-level INFO
-docker compose exec api python -m agentic_oran_rca.main build-graph
-docker compose exec api python -m agentic_oran_rca.main index-vectors
+docker compose exec api python -m agentic_oran_rca.main build-graph --limit 1000
+docker compose exec api python -m agentic_oran_rca.main index-vectors --limit 1000
+docker compose exec api python -m agentic_oran_rca.main index-telco-vectors
+docker compose restart api
 docker compose exec api python -m agentic_oran_rca.main evaluate --test-size 0.25 --seed 42
 ```
 
@@ -75,9 +81,13 @@ $body = @{ cell = "Cell15"; alarm = "Cell Down"; kpi = "RSRP Drop" } | ConvertTo
 Invoke-WebRequest -Uri "http://localhost:8000/run_rca_with_healing" -Method POST -ContentType "application/json" -Body $body
 ```
 
-Outputs:
-- `results/healing_reports/healing_<cell>_<timestamp>.json` – auto-correction report
-- `results/notifications.jsonl` – notification log (success or failure)
+Outputs (MTP1 milestone — from MTP1 onward):
+- [`MTP1/responses/healing_reports/`](MTP1/responses/healing_reports/) – healing report JSON per run
+- [`MTP1/responses/api/`](MTP1/responses/api/) – full API response JSON
+- [`MTP1/responses/notifications.jsonl`](MTP1/responses/notifications.jsonl) – notification audit log
+- Design diagrams: [`MTP1/diagrams/ARCHITECTURE.md`](MTP1/diagrams/ARCHITECTURE.md)
+
+Sklearn/ranking evaluation outputs remain under `results/`.
 
 #### Start application (Local, without Docker)
 
@@ -210,8 +220,10 @@ docker exec -it agentic_oran_rca-ollama-1 ollama pull nomic-embed-text
 
 ```bash
 docker compose exec api python -m agentic_oran_rca.main generate-data --rows 800 --seed 42 --start-time-utc 2026-01-01T00:00:00 --span-days 60 --log-level INFO
-docker compose exec api python -m agentic_oran_rca.main build-graph
-docker compose exec api python -m agentic_oran_rca.main index-vectors
+docker compose exec api python -m agentic_oran_rca.main build-graph --limit 1000
+docker compose exec api python -m agentic_oran_rca.main index-vectors --limit 1000
+docker compose exec api python -m agentic_oran_rca.main index-telco-vectors
+docker compose restart api
 docker compose exec api python -m agentic_oran_rca.main evaluate --test-size 0.25 --seed 42
 ```
 
@@ -257,4 +269,16 @@ python -m agentic_oran_rca.main evaluate --test-size 0.25 --seed 42
 python -m agentic_oran_rca.main evaluate-ranking --test-size 0.25 --seed 42 --k-values 1,3,5,7,10 --retrieve-pool 40
 python -m agentic_oran_rca.main serve --host 0.0.0.0 --port 8000
 ```
+
+### Appendix A — Reproducibility checklist
+
+- Docker Compose stack up; Ollama models pulled per this README (e.g. `llama3`, `nomic-embed-text`).
+- Run: `generate-data` → `build-graph` → `index-vectors` → `evaluate` → optional `evaluate-ranking`.
+- Archive `results/evaluation_results.csv`, `results/graphs/*`, and `results/ranking_evaluation/*` with submission or reports.
+- Export architecture figures from `docs/ARCHITECTURE.md` if your write-up requires diagrams.
+- Capture API screenshots (Postman or `/docs`) for validation evidence.
+
+### Appendix B — Metric definitions (ranking)
+
+For each test query, let the ground-truth root cause be \(g\). The retriever yields a **deduplicated** ordered list \(c_1, c_2, \ldots\). For cutoff \(K\), use \(\mathrm{top}_K = (c_1,\ldots,c_K)\) and hit indicator \(h_K = 1\) if \(g \in \mathrm{top}_K\), else \(0\). With one relevant label per query: **P@K** \(= h_K/K\), **R@K** \(= h_K\), **F1@K** \(= 2\cdot\mathrm{P@K}\cdot\mathrm{R@K}/(\mathrm{P@K}+\mathrm{R@K})\) (0 if the denominator is 0). Macro averages are over queries; see `agentic_oran_rca/evaluation/ranking_metrics.py`.
 

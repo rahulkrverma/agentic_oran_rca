@@ -7,6 +7,7 @@ scikit-learn
 neo4j
 langchain
 langchain-community
+langchain-ollama
 chromadb
 fastapi
 uvicorn[standard]

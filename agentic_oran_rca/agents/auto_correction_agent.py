@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 
 from agentic_oran_rca.agents.context_agent import ContextRetrievalAgent, RetrievedContext

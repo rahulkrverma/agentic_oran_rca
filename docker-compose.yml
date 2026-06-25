@@ -69,6 +69,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./results:/app/results
+      - ./MTP1:/app/MTP1
 
 volumes:
   neo4j_data:

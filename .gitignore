@@ -34,16 +34,45 @@ htmlcov/
 .env.local
 *.pem
 
-# Project-specific
-docs/PROJECT_REPORT.md
-docs/ARCHITECTURE.md
-docs/PROJECT_REPORT.docx
-data/*.csv
-data/topology.json
+# ---------------------------------------------------------------------------
+# Project — local data, outputs, deliverables (not versioned)
+# ---------------------------------------------------------------------------
+
+# All datasets (generated O-RAN CSV/topology + external TelcoLLM JSONL)
+data/
+
+# Runtime evaluation, graphs, healing copies, telco metrics
 results/
+
+# MTP1 milestone: thesis, IEEE paper, PPT, diagrams, API/healing/telco responses
+MTP1/
+
+# Documentation, reports, architecture exports, this guide, Postman notes
+docs/
+
+# Auxiliary / one-off scripts (PPT generator, LLM backend validation)
+scripts/
+
+# Legacy duplicate wrappers and old package layouts
+archive/
+
+# API testing guide (local; canonical steps are in README + MTP1 runbooks)
+POSTMAN_API_GUIDE.md
+
+# Office / presentation artifacts (if created at repo root)
+*.pptx
+*.docx
+~$*
+
+# Draw.io / diagram sources
+*.drawio
+
+# Logs
 *.log
 
-# OS
+# ---------------------------------------------------------------------------
+# OS / tools
+# ---------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
 

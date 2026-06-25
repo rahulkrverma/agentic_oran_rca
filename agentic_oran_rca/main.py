@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,10 @@ from agentic_oran_rca.agents.explanation_agent import ExplanationAgent, Explanat
 from agentic_oran_rca.agents.notification_service import HealingReport, NotificationService
 from agentic_oran_rca.agents.remediation_agent import RemediationAgent
 from agentic_oran_rca.agents.rca_agent import RCAAnalysisAgent, RCAAgentConfig
+from agentic_oran_rca.agents.vector_database_update_agent import (
+    HealingCorrectionRecord,
+    VectorDatabaseUpdateAgent,
+)
 from agentic_oran_rca.config import Settings, load_settings
 from agentic_oran_rca.evaluation.graph_generator import (
     plot_accuracy_comparison,
@@ -31,6 +36,11 @@ from agentic_oran_rca.evaluation.graph_generator import (
 )
 from agentic_oran_rca.evaluation.metrics import compute_metrics
 from agentic_oran_rca.evaluation.ranking_metrics import run_ranking_evaluation
+from agentic_oran_rca.evaluation.telco_explanation_eval import (
+    export_telco_for_llm_validation,
+    run_telco_evaluation,
+)
+from agentic_oran_rca.data.telco_llm_dataset import DEFAULT_TELCO_DIR, load_telco_split
 from agentic_oran_rca.graph.graph_builder import (
     TopologySpec,
     generate_oran_topology,
@@ -40,12 +50,14 @@ from agentic_oran_rca.graph.graph_builder import (
 from agentic_oran_rca.graph.neo4j_client import Neo4jClient, Neo4jConfig
 from agentic_oran_rca.logging_utils import setup_logging
 from agentic_oran_rca.rag.retriever import IncidentRetriever
+from agentic_oran_rca.rag.telco_vector_store import TELCO_COLLECTION_NAME, build_telco_vector_store, upsert_telco_records
 from agentic_oran_rca.rag.vector_store import (
     VectorStoreConfig,
     build_chroma_http_client,
     build_vector_store,
     upsert_incident_documents,
 )
+from agentic_oran_rca.telco_pipeline import build_telco_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +67,14 @@ DATA_DIR = PROJECT_ROOT / "data"
 RESULTS_DIR = PROJECT_ROOT / "results"
 GRAPHS_DIR = RESULTS_DIR / "graphs"
 RANKING_EVALUATION_DIR = RESULTS_DIR / "ranking_evaluation"
+MTP1_DIR = PROJECT_ROOT / "MTP1"
+MTP1_RESPONSES_DIR = MTP1_DIR / "responses"
+MTP1_HEALING_REPORTS_DIR = MTP1_RESPONSES_DIR / "healing_reports"
+MTP1_API_RESPONSES_DIR = MTP1_RESPONSES_DIR / "api"
+MTP1_TELCO_DIR = MTP1_RESPONSES_DIR / "telco"
+MTP1_NOTIFICATIONS_PATH = MTP1_RESPONSES_DIR / "notifications.jsonl"
+TELCO_DATASET_DIR = DATA_DIR / "dataSet"
+TELCO_EVAL_DIR = RESULTS_DIR / "telco_evaluation"
 
 
 class RCAPipeline:
@@ -110,7 +130,8 @@ def build_pipeline(settings: Settings) -> RCAPipeline:
 
 class HealingPipeline:
     """
-    Self-healing extension: runs RCA (unchanged), then remediation + report + notification.
+    Self-healing extension: runs RCA (unchanged), then remediation, notification,
+    and VectorDatabaseUpdateAgent when remediation succeeds.
     Does not modify the core RCA flow.
     """
 
@@ -120,11 +141,13 @@ class HealingPipeline:
         ctx_agent: ContextRetrievalAgent,
         remediation_agent: RemediationAgent,
         notification_service: NotificationService,
+        vector_update_agent: VectorDatabaseUpdateAgent,
     ) -> None:
         self._rca = rca_pipeline
         self._ctx_agent = ctx_agent
         self._remediation = remediation_agent
         self._notifier = notification_service
+        self._vector_update_agent = vector_update_agent
 
     def run_with_healing(self, cell: str, alarm: str, kpi: str) -> dict[str, Any]:
         rca_out = self._rca.run(cell=cell, alarm=alarm, kpi=kpi)
@@ -161,7 +184,20 @@ class HealingPipeline:
             message=rem.message,
             report_path=report_path,
         )
-        return {
+        vector_update = self._vector_update_agent.run(
+            HealingCorrectionRecord(
+                cell=cell,
+                du=ctx.du,
+                cu=ctx.cu,
+                alarm=alarm,
+                kpi=kpi,
+                root_cause=rca_out["predicted_root_cause"],
+                timestamp_utc=rem.timestamp_utc,
+                remediation_action=rem.action,
+                remediation_success=rem.success,
+            )
+        )
+        payload = {
             "predicted_root_cause": rca_out["predicted_root_cause"],
             "confidence": rca_out["confidence"],
             "explanation": rca_out["explanation"],
@@ -172,8 +208,13 @@ class HealingPipeline:
                 "message": rem.message,
                 "report_path": str(report_path),
                 "notification_sent": True,
+                "vector_indexed": vector_update.vector_indexed,
+                "chroma_document_id": vector_update.chroma_document_id,
+                "vector_update_skipped_reason": vector_update.skipped_reason,
             },
         }
+        self._notifier.write_api_response(endpoint="run_rca_with_healing", cell=cell, payload=payload)
+        return payload
 
 
 def build_healing_pipeline(settings: Settings) -> HealingPipeline:
@@ -193,14 +234,17 @@ def build_healing_pipeline(settings: Settings) -> HealingPipeline:
     ctx_agent = ContextRetrievalAgent(neo4j=neo4j, retriever=IncidentRetriever(vs))
     remediation = RemediationAgent(success_rate=0.85)
     notifier = NotificationService(
-        reports_dir=RESULTS_DIR / "healing_reports",
-        notifications_path=RESULTS_DIR / "notifications.jsonl",
+        reports_dir=MTP1_HEALING_REPORTS_DIR,
+        notifications_path=MTP1_NOTIFICATIONS_PATH,
+        api_responses_dir=MTP1_API_RESPONSES_DIR,
     )
+    vector_update_agent = VectorDatabaseUpdateAgent(vs)
     return HealingPipeline(
         rca_pipeline=pipeline,
         ctx_agent=ctx_agent,
         remediation_agent=remediation,
         notification_service=notifier,
+        vector_update_agent=vector_update_agent,
     )
 
 
@@ -251,35 +295,62 @@ def _require_file(path: Path) -> None:
         raise RuntimeError(f"Required file not found: {path}")
 
 
+def _load_dataset_rows(limit: int) -> list[dict[str, Any]]:
+    _require_file(DATA_DIR / "telecom_dataset.csv")
+    df = pd.read_csv(DATA_DIR / "telecom_dataset.csv")
+    total = len(df)
+    if limit <= 0:
+        raise ValueError(f"--limit must be positive, got {limit}")
+    if limit > total:
+        raise ValueError(f"--limit {limit} exceeds dataset size {total}")
+    if limit < total:
+        logger.info("Using first %d of %d rows from telecom_dataset.csv (file unchanged)", limit, total)
+    return df.head(limit).to_dict(orient="records")
+
+
 def cmd_generate_data(args: argparse.Namespace) -> None:
     setup_logging(args.log_level)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    topo = generate_oran_topology(
-        TopologySpec(num_cus=2, num_dus=6, num_cells=40, neighbor_k=3, seed=int(args.seed))
+    from agentic_oran_rca.data.dataset_generator import (
+        DatasetSpec as DS,
+        default_topology_for_rows,
+        generate_enterprise_dataset,
+        EnterpriseDatasetSpec,
     )
+
+    topo_spec = default_topology_for_rows(rows=int(args.rows), seed=int(args.seed))
+    topo = generate_oran_topology(topo_spec)
     (DATA_DIR / "topology.json").write_text(json.dumps(topo, indent=2), encoding="utf-8")
 
-    from agentic_oran_rca.data.dataset_generator import DatasetSpec as DS, generate_synthetic_dataset
-
-    df = generate_synthetic_dataset(
+    df = generate_enterprise_dataset(
         topo=topo,
-        spec=DS(rows=int(args.rows), seed=int(args.seed), start_time_utc=args.start_time_utc, span_days=int(args.span_days)),
+        spec=EnterpriseDatasetSpec(
+            rows=int(args.rows),
+            seed=int(args.seed),
+            start_time_utc=args.start_time_utc,
+            span_days=int(args.span_days),
+        ),
     )
     df.to_csv(DATA_DIR / "telecom_dataset.csv", index=False)
-    logger.info("Generated dataset rows=%d", len(df))
+    logger.info(
+        "Generated enterprise dataset rows=%d columns=%d topology(cells=%d dus=%d cus=%d)",
+        len(df),
+        len(df.columns),
+        topo_spec.num_cells,
+        topo_spec.num_dus,
+        topo_spec.num_cus,
+    )
 
 
-def cmd_build_graph(_: argparse.Namespace) -> None:
+def cmd_build_graph(args: argparse.Namespace) -> None:
     settings = load_settings()
     setup_logging(settings.log_level)
 
     _require_file(DATA_DIR / "topology.json")
-    _require_file(DATA_DIR / "telecom_dataset.csv")
 
     topo = json.loads((DATA_DIR / "topology.json").read_text(encoding="utf-8"))
-    df = pd.read_csv(DATA_DIR / "telecom_dataset.csv")
-    rows = df.to_dict(orient="records")
+    rows = _load_dataset_rows(int(args.limit))
 
     neo4j = Neo4jClient(
         Neo4jConfig(uri=settings.neo4j_uri, user=settings.neo4j_user, password=settings.neo4j_password)
@@ -290,12 +361,11 @@ def cmd_build_graph(_: argparse.Namespace) -> None:
     logger.info("Neo4j graph loaded")
 
 
-def cmd_index_vectors(_: argparse.Namespace) -> None:
+def cmd_index_vectors(args: argparse.Namespace) -> None:
     settings = load_settings()
     setup_logging(settings.log_level)
 
-    _require_file(DATA_DIR / "telecom_dataset.csv")
-    df = pd.read_csv(DATA_DIR / "telecom_dataset.csv")
+    rows = _load_dataset_rows(int(args.limit))
 
     # Clear and re-index deterministically by dropping and recreating the collection via raw Chroma client
     client = build_chroma_http_client(settings.chroma_host, settings.chroma_port)
@@ -314,7 +384,7 @@ def cmd_index_vectors(_: argparse.Namespace) -> None:
         )
     )
 
-    n = upsert_incident_documents(vs=vs, rows=df.to_dict(orient="records"), id_prefix="case_")
+    n = upsert_incident_documents(vs=vs, rows=rows, id_prefix="case_")
     logger.info("Indexed %d incidents into Chroma", n)
 
 
@@ -448,6 +518,125 @@ def cmd_evaluate_ranking(args: argparse.Namespace) -> None:
     )
 
 
+def _parse_bool_flag(value: str, flag_name: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"{flag_name} must be 'true' or 'false', got {value!r}")
+
+
+def _resolve_telco_dir(path_arg: str | None) -> Path:
+    if path_arg:
+        return Path(path_arg)
+    return TELCO_DATASET_DIR
+
+
+def cmd_index_telco_vectors(args: argparse.Namespace) -> None:
+    settings = load_settings()
+    setup_logging(settings.log_level)
+
+    data_dir = _resolve_telco_dir(args.data_dir)
+    train_records = load_telco_split(data_dir, "train")
+    if not train_records:
+        raise RuntimeError(f"No train records found under {data_dir}")
+
+    client = build_chroma_http_client(settings.chroma_host, settings.chroma_port)
+    try:
+        client.delete_collection(name=TELCO_COLLECTION_NAME)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to delete existing telco Chroma collection (possibly first run): %s", exc)
+
+    vs = build_telco_vector_store(
+        VectorStoreConfig(
+            chroma_host=settings.chroma_host,
+            chroma_port=settings.chroma_port,
+            collection_name=TELCO_COLLECTION_NAME,
+            ollama_base_url=settings.ollama_base_url,
+            ollama_embed_model=settings.ollama_embed_model,
+        )
+    )
+    n = upsert_telco_records(vs=vs, records=train_records)
+    logger.info("Indexed %d telco train records into Chroma collection %s", n, TELCO_COLLECTION_NAME)
+
+
+def cmd_evaluate_telco(args: argparse.Namespace) -> None:
+    settings = load_settings()
+    setup_logging(settings.log_level)
+
+    data_dir = _resolve_telco_dir(args.data_dir)
+    records = load_telco_split(data_dir, args.split)
+    use_rag = _parse_bool_flag(args.use_rag, "--use-rag")
+    summary = run_telco_evaluation(
+        records,
+        settings,
+        split=args.split,
+        use_rag=use_rag,
+        output_dir=TELCO_EVAL_DIR,
+        limit=int(args.limit),
+    )
+    logger.info(
+        "Telco eval (%s, rag=%s): n=%d action_overlap=%.4f cause_overlap=%.4f combined=%.4f",
+        summary.split,
+        summary.use_rag,
+        summary.n_evaluated,
+        summary.mean_action_token_overlap,
+        summary.mean_cause_token_overlap,
+        summary.mean_combined_text_overlap,
+    )
+
+
+def cmd_run_telco_sample(args: argparse.Namespace) -> None:
+    settings = load_settings()
+    setup_logging(settings.log_level)
+
+    data_dir = _resolve_telco_dir(args.data_dir)
+    records = load_telco_split(data_dir, args.split)
+    index = int(args.index)
+    if index < 0 or index >= len(records):
+        raise ValueError(f"--index {index} out of range for split {args.split!r} (size {len(records)})")
+
+    record = records[index]
+    use_rag = _parse_bool_flag(args.use_rag, "--use-rag")
+    pipeline = build_telco_pipeline(settings, with_retriever=use_rag)
+    out = pipeline.run(symptoms=record.symptoms, use_rag=use_rag)
+
+    MTP1_TELCO_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    rag_tag = "rag" if use_rag else "no_rag"
+    filename = f"telco_{record.record_id}_{rag_tag}_{ts}.json"
+    payload = {
+        "record_id": record.record_id,
+        "split": record.split,
+        "index": index,
+        "symptoms": record.symptoms,
+        "reference_cause": record.reference_cause,
+        "reference_actions": record.reference_actions,
+        "use_rag": use_rag,
+        "predicted_cause": out["predicted_cause"],
+        "confidence": out["confidence"],
+        "explanation": out["explanation"],
+        "recommended_actions": out["recommended_actions"],
+        "similar_incidents": out["similar_incidents"],
+    }
+    out_path = MTP1_TELCO_DIR / filename
+    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    logger.info("Wrote telco sample response to %s", out_path)
+
+
+def cmd_export_telco_json(args: argparse.Namespace) -> None:
+    settings = load_settings()
+    setup_logging(settings.log_level)
+
+    data_dir = _resolve_telco_dir(args.data_dir)
+    records = load_telco_split(data_dir, args.split)
+    use_rag = _parse_bool_flag(args.use_rag, "--use-rag")
+    output_path = Path(args.output)
+    export_telco_for_llm_validation(records, settings, output_path, use_rag=use_rag)
+    logger.info("Exported telco JSON for LLM backend validation to %s", output_path)
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     settings = load_settings()
     setup_logging(settings.log_level)
@@ -470,9 +659,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     g.set_defaults(func=cmd_generate_data)
 
     b = sub.add_parser("build-graph")
+    b.add_argument("--limit", type=int, required=True, help="Use first N rows from telecom_dataset.csv")
     b.set_defaults(func=cmd_build_graph)
 
     i = sub.add_parser("index-vectors")
+    i.add_argument("--limit", type=int, required=True, help="Use first N rows from telecom_dataset.csv")
     i.set_defaults(func=cmd_index_vectors)
 
     e = sub.add_parser("evaluate")
@@ -497,6 +688,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", type=str, required=True)
     s.add_argument("--port", type=int, required=True)
     s.set_defaults(func=cmd_serve)
+
+    tv = sub.add_parser("index-telco-vectors")
+    tv.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="Path to telco JSONL directory (default: data/dataSet)",
+    )
+    tv.set_defaults(func=cmd_index_telco_vectors)
+
+    te = sub.add_parser("evaluate-telco")
+    te.add_argument("--split", type=str, required=True, choices=["train", "valid", "test"])
+    te.add_argument("--limit", type=int, required=True, help="Evaluate first N records from the split")
+    te.add_argument("--use-rag", type=str, required=True, help="true or false")
+    te.add_argument("--data-dir", type=str, default=None)
+    te.set_defaults(func=cmd_evaluate_telco)
+
+    ts = sub.add_parser("run-telco-sample")
+    ts.add_argument("--split", type=str, required=True, choices=["train", "valid", "test"])
+    ts.add_argument("--index", type=int, required=True, help="Zero-based record index within the split")
+    ts.add_argument("--use-rag", type=str, required=True, help="true or false")
+    ts.add_argument("--data-dir", type=str, default=None)
+    ts.set_defaults(func=cmd_run_telco_sample)
+
+    ex = sub.add_parser("export-telco-json")
+    ex.add_argument("--split", type=str, required=True, choices=["train", "valid", "test"])
+    ex.add_argument("--use-rag", type=str, required=True, help="true or false")
+    ex.add_argument("--output", type=str, required=True, help="Output JSON path")
+    ex.add_argument("--data-dir", type=str, default=None)
+    ex.set_defaults(func=cmd_export_telco_json)
 
     return p
 

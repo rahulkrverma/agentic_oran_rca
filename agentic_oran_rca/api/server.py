@@ -14,7 +14,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agentic_oran_rca.config import load_settings
 from agentic_oran_rca.logging_utils import setup_logging
-from agentic_oran_rca.main import RANKING_EVALUATION_DIR, build_auto_correction_agent, build_healing_pipeline, build_pipeline
+from agentic_oran_rca.main import (
+    MTP1_TELCO_DIR,
+    RANKING_EVALUATION_DIR,
+    build_auto_correction_agent,
+    build_healing_pipeline,
+    build_pipeline,
+)
+from agentic_oran_rca.telco_pipeline import build_telco_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +99,9 @@ class HealingReportSchema(BaseModel):
     message: str
     report_path: str
     notification_sent: bool
+    vector_indexed: bool
+    chroma_document_id: str | None = None
+    vector_update_skipped_reason: str | None = None
 
 
 class RCAResponseWithHealing(BaseModel):
@@ -112,6 +122,23 @@ class AutoCorrectionResponse(BaseModel):
     final_explanation: str
 
 
+class TelcoFaultRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    symptoms: str = Field(..., min_length=1)
+    use_rag: bool
+
+
+class TelcoFaultResponse(BaseModel):
+    symptoms: str
+    use_rag: bool
+    predicted_cause: str
+    confidence: float
+    explanation: str
+    recommended_actions: str
+    similar_incidents: list[dict[str, Any]]
+    response_path: str | None = None
+
+
 def create_app() -> FastAPI:
     settings = load_settings()
     setup_logging(settings.log_level)
@@ -120,6 +147,8 @@ def create_app() -> FastAPI:
     pipeline = build_pipeline(settings)
     healing_pipeline = build_healing_pipeline(settings)
     auto_correction_agent = build_auto_correction_agent(settings)
+    telco_pipeline_rag = build_telco_pipeline(settings, with_retriever=True)
+    telco_pipeline_no_rag = build_telco_pipeline(settings, with_retriever=False)
 
     @app.post("/run_rca", response_model=RCAResponse)
     async def run_rca(request: Request) -> RCAResponse | JSONResponse:
@@ -171,6 +200,37 @@ def create_app() -> FastAPI:
             return AutoCorrectionResponse(**out)
         except Exception as e:
             logger.exception("run_auto_correction failed")
+            return JSONResponse(
+                status_code=500,
+                content={"detail": str(e), "traceback": traceback.format_exc()},
+            )
+
+    @app.post("/run_telco_fault_analysis", response_model=TelcoFaultResponse)
+    async def run_telco_fault_analysis(request: Request) -> TelcoFaultResponse | JSONResponse:
+        try:
+            data = await _parse_body(request)
+            req = TelcoFaultRequest(**data)
+            telco_pipeline = telco_pipeline_rag if req.use_rag else telco_pipeline_no_rag
+            out = telco_pipeline.run(symptoms=req.symptoms, use_rag=req.use_rag)
+            MTP1_TELCO_DIR.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+            rag_tag = "rag" if req.use_rag else "no_rag"
+            filename = f"telco_api_{rag_tag}_{ts}.json"
+            response_path = MTP1_TELCO_DIR / filename
+            payload = {**out, "endpoint": "run_telco_fault_analysis"}
+            response_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            return TelcoFaultResponse(
+                symptoms=out["symptoms"],
+                use_rag=out["use_rag"],
+                predicted_cause=out["predicted_cause"],
+                confidence=float(out["confidence"]),
+                explanation=out["explanation"],
+                recommended_actions=out["recommended_actions"],
+                similar_incidents=out["similar_incidents"],
+                response_path=str(response_path),
+            )
+        except Exception as e:
+            logger.exception("run_telco_fault_analysis failed")
             return JSONResponse(
                 status_code=500,
                 content={"detail": str(e), "traceback": traceback.format_exc()},

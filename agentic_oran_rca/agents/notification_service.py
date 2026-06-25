@@ -49,9 +49,15 @@ class NotificationService:
     In production, this would integrate with NOC ticketing, PagerDuty, or OSS.
     """
 
-    def __init__(self, reports_dir: Path, notifications_path: Path) -> None:
+    def __init__(
+        self,
+        reports_dir: Path,
+        notifications_path: Path,
+        api_responses_dir: Path | None = None,
+    ) -> None:
         self._reports_dir = reports_dir
         self._notifications_path = notifications_path
+        self._api_responses_dir = api_responses_dir
 
     def write_healing_report(self, report: HealingReport) -> Path:
         self._reports_dir.mkdir(parents=True, exist_ok=True)
@@ -86,3 +92,15 @@ class NotificationService:
         with open(self._notifications_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
         logger.info("Notification recorded: %s for %s", notification_type, cell)
+
+    def write_api_response(self, endpoint: str, cell: str, payload: dict[str, Any]) -> Path | None:
+        if self._api_responses_dir is None:
+            return None
+        self._api_responses_dir.mkdir(parents=True, exist_ok=True)
+        ts_safe = datetime.now(timezone.utc).isoformat().replace(":", "-").replace(".", "-")[:19]
+        cell_safe = cell.replace(" ", "_")
+        filename = f"{endpoint}_{cell_safe}_{ts_safe}.json"
+        path = self._api_responses_dir / filename
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.info("API response written: %s", path)
+        return path
